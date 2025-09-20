@@ -1,0 +1,21 @@
+dataset:
+  root: ./data
+  IRSTD-1k:
+    split_method: "50_50"
+    size: 512
+    model: FADMFormer
+    batch: 4
+    aug: 0.
+  NUAA-SIRST:
+    split_method: "50_50"
+    size: 512
+    model: FADMFormer
+    batch: 4
+    aug: 0.
+  NUDT-SIRST:
+    split_method: "60_40"
+    size: 256
+    model: FADMFormer
+    batch: 16
+    aug: 0.
+
