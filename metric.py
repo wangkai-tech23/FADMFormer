@@ -1,199 +1,242 @@
+from typing import Tuple
+
 import numpy as np
 import torch
 from skimage import measure
-import torch.nn.functional as F
-class SigmoidMetric():
-    def __init__(self):
+
+
+def _to_numpy(x):
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _logits_to_prob(pred):
+    if torch.is_tensor(pred):
+        return torch.sigmoid(pred).detach().cpu().numpy()
+    pred = np.asarray(pred, dtype=np.float32)
+    # If already in [0,1], keep it. Otherwise treat it as logits.
+    if pred.min() >= 0.0 and pred.max() <= 1.0:
+        return pred
+    return 1.0 / (1.0 + np.exp(-pred))
+
+
+def _prepare_arrays(pred, labels, thresh: float = 0.5):
+    prob = _logits_to_prob(pred)
+    gt = _to_numpy(labels).astype(np.float32)
+
+    if prob.ndim == 3:
+        prob = prob[:, None]
+    if gt.ndim == 3:
+        gt = gt[:, None]
+
+    pred_bin = (prob > float(thresh)).astype(np.uint8)
+    gt_bin = (gt > 0.5).astype(np.uint8)
+    return pred_bin, gt_bin, prob
+
+
+class SigmoidMetric:
+    """Dataset-level pixel accuracy and IoU using sigmoid threshold 0.5."""
+
+    def __init__(self, score_thresh: float = 0.5):
+        self.score_thresh = float(score_thresh)
         self.reset()
+
     def update(self, pred, labels):
-        correct, labeled = self.batch_pix_accuracy(pred, labels)
-        inter, union = self.batch_intersection_union(pred, labels)
-        self.total_correct += correct
-        self.total_label += labeled
-        self.total_inter += inter
-        self.total_union += union
+        pred_bin, gt_bin, _ = _prepare_arrays(pred, labels, self.score_thresh)
+        tp = np.logical_and(pred_bin == 1, gt_bin == 1).sum()
+        pred_pos = (pred_bin == 1).sum()
+        gt_pos = (gt_bin == 1).sum()
+        union = pred_pos + gt_pos - tp
+        correct = np.logical_and(pred_bin == gt_bin, gt_bin == 1).sum()
+
+        self.total_correct += float(correct)
+        self.total_label += float(gt_pos)
+        self.total_inter += float(tp)
+        self.total_union += float(union)
+
     def get(self):
-        """Gets the current evaluation result."""
-        pixAcc = 1.0 * self.total_correct / (np.spacing(1) + self.total_label)
-        IoU = 1.0 * self.total_inter / (np.spacing(1) + self.total_union)
-        mIoU = IoU.mean()
-        return pixAcc, mIoU
+        pix_acc = self.total_correct / (self.total_label + np.spacing(1))
+        iou = self.total_inter / (self.total_union + np.spacing(1))
+        return pix_acc, iou
+
     def reset(self):
-        self.total_inter = 0
-        self.total_union = 0
-        self.total_correct = 0
-        self.total_label = 0
-    def batch_pix_accuracy(self, output, target):
-        assert output.shape == target.shape
-        output = output.detach().numpy()
-        target = target.detach().numpy()
-        predict = (output > 0).astype('int64') # P
-        pixel_labeled = np.sum(target > 0) # T
-        pixel_correct = np.sum((predict == target)*(target > 0)) # TP
-        assert pixel_correct <= pixel_labeled
-        return pixel_correct, pixel_labeled
-    def batch_intersection_union(self, output, target):
-        mini = 1
-        maxi = 1
-        nbins = 1
-        predict = (output.detach().numpy() > 0).astype('int64') # P
-        target = target.numpy().astype('int64') # T
-        intersection = predict * (predict == target) # TP
-        area_inter, _ = np.histogram(intersection, bins=nbins, range=(mini, maxi))
-        area_pred, _ = np.histogram(predict, bins=nbins, range=(mini, maxi))
-        area_lab, _ = np.histogram(target, bins=nbins, range=(mini, maxi))
-        area_union = area_pred + area_lab - area_inter
-        assert (area_inter <= area_union).all()
-        return area_inter, area_union
-class SamplewiseSigmoidMetric():
-    def __init__(self, nclass, score_thresh=0.5):
+        self.total_inter = 0.0
+        self.total_union = 0.0
+        self.total_correct = 0.0
+        self.total_label = 0.0
+
+
+class SamplewiseSigmoidMetric:
+    """Sample-wise nIoU metric."""
+
+    def __init__(self, nclass: int = 1, score_thresh: float = 0.5):
         self.nclass = nclass
-        self.score_thresh = score_thresh
+        self.score_thresh = float(score_thresh)
         self.reset()
+
     def update(self, preds, labels):
-        inter_arr, union_arr = self.batch_intersection_union(preds, labels,self.nclass, self.score_thresh)
-        self.total_inter = np.append(self.total_inter, inter_arr)
-        self.total_union = np.append(self.total_union, union_arr)
+        pred_bin, gt_bin, _ = _prepare_arrays(preds, labels, self.score_thresh)
+        b = pred_bin.shape[0]
+        for i in range(b):
+            tp = np.logical_and(pred_bin[i] == 1, gt_bin[i] == 1).sum()
+            pred_pos = (pred_bin[i] == 1).sum()
+            gt_pos = (gt_bin[i] == 1).sum()
+            union = pred_pos + gt_pos - tp
+            self.total_inter = np.append(self.total_inter, float(tp))
+            self.total_union = np.append(self.total_union, float(union))
+
     def get(self):
-        IoU = 1.0 * self.total_inter / (np.spacing(1) + self.total_union)
-        mIoU = IoU.mean()
-        return IoU, mIoU
+        if self.total_union.size == 0:
+            return np.array([]), 0.0
+        iou = self.total_inter / (self.total_union + np.spacing(1))
+        return iou, float(iou.mean())
+
     def reset(self):
-        self.total_inter = np.array([])
-        self.total_union = np.array([])
-        self.total_correct = np.array([])
-        self.total_label = np.array([])
-    def batch_intersection_union(self, output, target, nclass, score_thresh):
-        mini = 1
-        maxi = 1
-        nbins = 1
-        predict = (F.sigmoid(output).detach().numpy() > score_thresh).astype('int64') # P
-        target = target.detach().numpy().astype('int64') # T
-        intersection = predict * (predict == target) # TP
-        num_sample = intersection.shape[0]
-        area_inter_arr = np.zeros(num_sample)
-        area_pred_arr = np.zeros(num_sample)
-        area_lab_arr = np.zeros(num_sample)
-        area_union_arr = np.zeros(num_sample)
-        for b in range(num_sample):
-            area_inter, _ = np.histogram(intersection[b], bins=nbins, range=(mini, maxi))
-            area_inter_arr[b] = area_inter
-            area_pred, _ = np.histogram(predict[b], bins=nbins, range=(mini, maxi))
-            area_pred_arr[b] = area_pred
-            area_lab, _ = np.histogram(target[b], bins=nbins, range=(mini, maxi))
-            area_lab_arr[b] = area_lab
-            area_union = area_pred + area_lab - area_inter
-            area_union_arr[b] = area_union
-            assert (area_inter <= area_union).all()
-        return area_inter_arr, area_union_arr
-class ROCMetric():
-    def __init__(self, nclass, bins):
-        super(ROCMetric, self).__init__()
+        self.total_inter = np.array([], dtype=np.float64)
+        self.total_union = np.array([], dtype=np.float64)
+
+
+class ROCMetric:
+    """ROC/PR curve arrays over thresholds from 0 to 1."""
+
+    def __init__(self, nclass: int = 1, bins: int = 10):
         self.nclass = nclass
-        self.bins = bins
-        self.tp_arr = np.zeros(self.bins+1)
-        self.pos_arr = np.zeros(self.bins+1)
-        self.fp_arr = np.zeros(self.bins+1)
-        self.neg_arr = np.zeros(self.bins+1)
-        self.class_pos=np.zeros(self.bins+1)
+        self.bins = int(bins)
+        self.reset()
+
     def update(self, preds, labels):
-        for iBin in range(self.bins+1):
-            score_thresh = (iBin + 0.0) / self.bins
-            # print(iBin, "-th, score_thresh: ", score_thresh)
-            i_tp, i_pos, i_fp, i_neg,i_class_pos = cal_tp_pos_fp_neg(preds, labels, self.nclass,score_thresh)
-            self.tp_arr[iBin]   += i_tp
-            self.pos_arr[iBin]  += i_pos
-            self.fp_arr[iBin]   += i_fp
-            self.neg_arr[iBin]  += i_neg
-            self.class_pos[iBin]+=i_class_pos
+        prob = _logits_to_prob(preds)
+        gt = _to_numpy(labels).astype(np.float32)
+        if prob.ndim == 3:
+            prob = prob[:, None]
+        if gt.ndim == 3:
+            gt = gt[:, None]
+        gt = (gt > 0.5).astype(np.uint8)
+
+        for i_bin in range(self.bins + 1):
+            thresh = i_bin / float(self.bins)
+            pred = (prob > thresh).astype(np.uint8)
+            tp = np.logical_and(pred == 1, gt == 1).sum()
+            fp = np.logical_and(pred == 1, gt == 0).sum()
+            tn = np.logical_and(pred == 0, gt == 0).sum()
+            fn = np.logical_and(pred == 0, gt == 1).sum()
+            self.tp_arr[i_bin] += tp
+            self.fp_arr[i_bin] += fp
+            self.pos_arr[i_bin] += tp + fn
+            self.neg_arr[i_bin] += fp + tn
+            self.class_pos[i_bin] += tp + fp
+
     def get(self):
-        tp_rates    = self.tp_arr / (self.pos_arr + 0.001)
-        fp_rates    = self.fp_arr / (self.neg_arr + 0.001)
-        recall      = self.tp_arr / (self.pos_arr   + 0.001)
-        precision   = self.tp_arr / (self.class_pos + 0.001)
+        tp_rates = self.tp_arr / (self.pos_arr + 1e-6)
+        fp_rates = self.fp_arr / (self.neg_arr + 1e-6)
+        recall = self.tp_arr / (self.pos_arr + 1e-6)
+        precision = self.tp_arr / (self.class_pos + 1e-6)
         return tp_rates, fp_rates, recall, precision
+
     def reset(self):
-        self.tp_arr   = np.zeros([11])
-        self.pos_arr  = np.zeros([11])
-        self.fp_arr   = np.zeros([11])
-        self.neg_arr  = np.zeros([11])
-        self.class_pos= np.zeros([11])
-class PD_FA():
-    def __init__(self, nclass, bins):
-        super(PD_FA, self).__init__()
+        self.tp_arr = np.zeros(self.bins + 1, dtype=np.float64)
+        self.pos_arr = np.zeros(self.bins + 1, dtype=np.float64)
+        self.fp_arr = np.zeros(self.bins + 1, dtype=np.float64)
+        self.neg_arr = np.zeros(self.bins + 1, dtype=np.float64)
+        self.class_pos = np.zeros(self.bins + 1, dtype=np.float64)
+
+
+class PD_FA:
+    """
+    Object-level probability of detection and false-alarm rate.
+
+    A predicted connected component matches a GT component when the centroid
+    distance is smaller than match_distance pixels. False alarms are counted by
+    the area of unmatched predicted components, and Fa is normalized by the
+    total number of image pixels.
+    """
+
+    def __init__(self, nclass: int = 1, bins: int = 10, match_distance: float = 3.0):
         self.nclass = nclass
-        self.bins = bins
-        self.image_area_total = []
-        self.image_area_match = []
-        self.FA = np.zeros(self.bins+1)
-        self.PD = np.zeros(self.bins + 1)
-        self.target= np.zeros(self.bins + 1)
+        self.bins = int(bins)
+        self.match_distance = float(match_distance)
+        self.reset()
+
     def update(self, preds, labels):
-        W = preds.shape[3]
-        for iBin in range(self.bins+1):
-            score_thresh = iBin * (255/self.bins)
-            predits  = np.array((preds > score_thresh).cpu()).astype('int64')
-            if W == 512:
-                predits  = np.reshape (predits,  (512,512))#512
-                labelss = np.array((labels).cpu()).astype('int64') # P
-                labelss = np.reshape (labelss , (512,512))#512
-            elif W==384:
-                predits = np.reshape(predits, (384, 384))  # 512
-                labelss = np.array((labels).cpu()).astype('int64')  # P
-                labelss = np.reshape(labelss, (384, 384))  # 512
-            else:
-                predits = np.reshape(predits, (512//2, 512//2))  # 512
-                labelss = np.array((labels).cpu()).astype('int64')  # P
-                labelss = np.reshape(labelss, (512//2, 512//2))  # 512
-            image = measure.label(predits, connectivity=2)
-            coord_image = measure.regionprops(image)
-            label = measure.label(labelss , connectivity=2)
-            coord_label = measure.regionprops(label)
-            self.target[iBin]    += len(coord_label)
-            self.image_area_total = []
-            self.image_area_match = []
-            self.distance_match   = []
-            self.dismatch         = []
-            for K in range(len(coord_image)):
-                area_image = np.array(coord_image[K].area)
-                self.image_area_total.append(area_image)
-            for i in range(len(coord_label)):
-                centroid_label = np.array(list(coord_label[i].centroid))
-                for m in range(len(coord_image)):
-                    centroid_image = np.array(list(coord_image[m].centroid))
-                    distance = np.linalg.norm(centroid_image - centroid_label)
-                    area_image = np.array(coord_image[m].area)
-                    if distance < 3:
-                        self.distance_match.append(distance)
-                        self.image_area_match.append(area_image)
+        prob = _logits_to_prob(preds)
+        gt = _to_numpy(labels).astype(np.float32)
+        if prob.ndim == 3:
+            prob = prob[:, None]
+        if gt.ndim == 3:
+            gt = gt[:, None]
+        gt = (gt > 0.5).astype(np.uint8)
 
-                        del coord_image[m]
-                        break
+        b, _, h, w = prob.shape
+        for i_bin in range(self.bins + 1):
+            thresh = i_bin / float(self.bins)
+            pred_bin = (prob > thresh).astype(np.uint8)
+            self.total_pixels[i_bin] += b * h * w
 
-            self.dismatch = [x for x in self.image_area_total if x not in self.image_area_match]
-            self.FA[iBin]+=np.sum(self.dismatch)
-            self.PD[iBin]+=len(self.distance_match)
-    def get(self,img_num):
-        Final_FA =  self.FA / ((512*512) * img_num)#512
-        Final_PD =  self.PD /self.target
-        return Final_FA,Final_PD
+            for bi in range(b):
+                pred_2d = pred_bin[bi, 0]
+                gt_2d = gt[bi, 0]
+
+                pred_label = measure.label(pred_2d, connectivity=2)
+                gt_label = measure.label(gt_2d, connectivity=2)
+                pred_props = list(measure.regionprops(pred_label))
+                gt_props = list(measure.regionprops(gt_label))
+
+                self.target[i_bin] += len(gt_props)
+                matched_pred = set()
+                matched_gt = 0
+
+                for g in gt_props:
+                    gyx = np.asarray(g.centroid, dtype=np.float32)
+                    best_dist = None
+                    best_idx = None
+                    for pi, p in enumerate(pred_props):
+                        if pi in matched_pred:
+                            continue
+                        pyx = np.asarray(p.centroid, dtype=np.float32)
+                        dist = np.linalg.norm(pyx - gyx)
+                        if best_dist is None or dist < best_dist:
+                            best_dist = dist
+                            best_idx = pi
+                    if best_idx is not None and best_dist is not None and best_dist < self.match_distance:
+                        matched_pred.add(best_idx)
+                        matched_gt += 1
+
+                false_area = 0.0
+                for pi, p in enumerate(pred_props):
+                    if pi not in matched_pred:
+                        false_area += float(p.area)
+
+                self.PD[i_bin] += matched_gt
+                self.FA[i_bin] += false_area
+
+    def get(self, img_num=None):
+        final_fa = self.FA / (self.total_pixels + 1e-6)
+        final_pd = self.PD / (self.target + 1e-6)
+        return final_fa, final_pd
+
     def reset(self):
-        self.FA  = np.zeros([self.bins+1])
-        self.PD  = np.zeros([self.bins+1])
+        self.FA = np.zeros(self.bins + 1, dtype=np.float64)
+        self.PD = np.zeros(self.bins + 1, dtype=np.float64)
+        self.target = np.zeros(self.bins + 1, dtype=np.float64)
+        self.total_pixels = np.zeros(self.bins + 1, dtype=np.float64)
+
+
 def cal_tp_pos_fp_neg(output, target, nclass, score_thresh):
-    predict = (torch.sigmoid(output) > score_thresh).float()
+    prob = torch.sigmoid(output)
+    predict = (prob > score_thresh).float()
     if len(target.shape) == 3:
-        target = np.expand_dims(target.float(), axis=1)
+        target = target.unsqueeze(1).float()
     elif len(target.shape) == 4:
         target = target.float()
     else:
         raise ValueError("Unknown target dimension")
-    intersection = predict * ((predict == target).float())
-    tp = intersection.sum()
-    fp = (predict * ((predict != target).float())).sum()
-    tn = ((1 - predict) * ((predict == target).float())).sum()
-    fn = (((predict != target).float()) * (1 - predict)).sum()
+    target = (target > 0.5).float()
+    tp = (predict * target).sum()
+    fp = (predict * (1 - target)).sum()
+    tn = ((1 - predict) * (1 - target)).sum()
+    fn = ((1 - predict) * target).sum()
     pos = tp + fn
     neg = fp + tn
-    class_pos= tp+fp
+    class_pos = tp + fp
     return tp, pos, fp, neg, class_pos
