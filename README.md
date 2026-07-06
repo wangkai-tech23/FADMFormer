@@ -8,6 +8,7 @@ By Xiaoxi Liao, Kai Wang*, Wei Jiang, Hongke Zhang
 * torch 2.1.2+cu118
 * torchvision 0.16.2+cu118
 * opencv-python 4.13.0.92
+* kornia 0.6.3
 * numpy 1.26.4
 * Pillow 10.3.0
 * tqdm 4.64.1
@@ -15,12 +16,20 @@ By Xiaoxi Liao, Kai Wang*, Wei Jiang, Hongke Zhang
 * imageio 2.34.0
 * einops 0.7.0
 * thop 0.1.1.post2209072238
+* PyYAML 6.0.2
+* colorama 0.4.6
+* tensorboard 2.14.0
+* albumentations 1.4.18
+* scikit-image 0.21.0
+* ptflops 0.7.3
+* fvcore 0.1.5.post20221221
 
 You can install the main dependencies with:
 
 ```bash
-pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu118
-pip install opencv-python==4.13.0.92 numpy==1.26.4 pillow==10.3.0 tqdm==4.64.1 matplotlib==3.8.2 imageio==2.34.0 einops==0.7.0 thop==0.1.1.post2209072238
+pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+pip install opencv-python==4.13.0.92 kornia==0.6.3 numpy==1.26.4 pillow==10.3.0 tqdm==4.64.1 matplotlib==3.8.2 imageio==2.34.0 einops==0.7.0 thop==0.1.1.post2209072238
+pip install pyyaml==6.0.2 colorama==0.4.6 tensorboard==2.14.0 albumentations==1.4.18 scikit-image==0.21.0 ptflops==0.7.3 fvcore==0.1.5.post20221221
 ## To test
 ```bash
 python test.py
